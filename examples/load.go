@@ -24,6 +24,7 @@ func main() {
 	opt6 := loadgen.WithExecLimitOpt(30)
 	opt7 := loadgen.WithExecLimitOpt(10)
 	fn1 := loadgen.NewFunction(
+		"fn1",
 		[]*loadgen.Stmt{
 			loadgen.NewStmt(foo1, 1, time.Microsecond, time.Microsecond, histOpt1, errOpt1),
 			loadgen.NewStmt(foo2, 1, time.Second, time.Second, histOpt2, errOpt2),
@@ -32,10 +33,12 @@ func main() {
 		opt5,
 	)
 	fn2 := loadgen.NewFunction(
+		"fn2",
 		[]*loadgen.Stmt{loadgen.NewStmt(bar, 1, time.Second, time.Second, histOpt3, errOpt3)},
 		3, opt6,
 	)
 	fn3 := loadgen.NewFunction(
+		"fn3",
 		[]*loadgen.Stmt{loadgen.NewStmt(foobar, 1, time.Second, time.Second, histOpt4, errOpt4)},
 		1, opt7,
 	)

@@ -26,6 +26,7 @@ const RampUpFactorPathStr = "/ramp_up_factor"
 // Loadgen randomly generates load based on the weight.
 // Function object passed to one load gen shouldn't be used in another load generation concurrently
 type Function struct {
+	name         string
 	stmts        []*Stmt
 	weight       uint16
 	execLimit    int
@@ -33,14 +34,15 @@ type Function struct {
 	finallyBlock *Stmt
 }
 
-func NewFunction(stmts []*Stmt, weight uint16, opts ...FunctionOption) *Function {
+func NewFunction(name string, stmts []*Stmt, weight uint16, opts ...FunctionOption) *Function {
 	f := &Function{
+		name:      name,
 		stmts:     stmts,
 		weight:    weight,
 		execLimit: -1,
 	}
 	for _, opt := range opts {
-		opt.enable(f)
+		opt(f)
 	}
 	return f
 }
@@ -73,7 +75,7 @@ func NewStmt(eval Evaluator, repeat uint,
 		waitInRepeatRangeEnd:   waitInRepeatRangeEnd,
 	}
 	for _, opt := range opts {
-		opt.enable(stmt)
+		opt(stmt)
 	}
 	return stmt
 }
@@ -101,17 +103,21 @@ type LoadGen struct {
 	rampUpDur    time.Duration
 	rampUpFactor float64
 	// workersCancelFns will be used to scale down workers
-	workersCancelFns []context.CancelFunc
-	workersLimit     int
-	workersProgress  int64
-	workersGuage     prometheus.Gauge
-	setWorkersCh     chan int
-	getWorkersCh     chan chan int
-	server           *http.Server
-	cancel           context.CancelFunc
+	workersCancelFns  []context.CancelFunc
+	workersLimit      int
+	workersProgress   int64
+	workersGuage      prometheus.Gauge
+	setWorkersCh      chan int
+	getWorkersCh      chan chan int
+	server            *http.Server
+	cancel            context.CancelFunc
+	funcHistogram     *prometheus.HistogramVec
+	funcStatusCounter *prometheus.CounterVec
+	statusCodeMapper  func(err error) string
+	statusCodes       []string
 }
 
-func GenerateLoad(ctx context.Context, cancel context.CancelFunc, loadLabel string, funcs []*Function, initialWorkers, workersLimit int, rampUpDur time.Duration, rampUpFactor float64) *LoadGen {
+func GenerateLoad(ctx context.Context, cancel context.CancelFunc, loadLabel string, funcs []*Function, initialWorkers, workersLimit int, rampUpDur time.Duration, rampUpFactor float64, opts ...LoadOption) *LoadGen {
 	lg := &LoadGen{
 		loadLabel:    loadLabel,
 		funcs:        funcs,
@@ -123,6 +129,32 @@ func GenerateLoad(ctx context.Context, cancel context.CancelFunc, loadLabel stri
 		getWorkersCh: make(chan chan int),
 		cancel:       cancel,
 		workersLimit: workersLimit,
+		funcHistogram: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: loadLabel,
+			Name:      "function",
+			Help:      "Histogram to track the duration of functions",
+			Buckets:   prometheus.DefBuckets,
+		}, []string{"function", "status_code"}),
+		funcStatusCounter: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: loadLabel,
+			Name:      "function_status",
+			Help:      "Counter for status of functions",
+		}, []string{"function", "status_code"}),
+		statusCodeMapper: func(err error) string {
+			if err == nil {
+				return "success"
+			}
+			return "failure"
+		},
+		statusCodes: []string{"success", "failure"},
+	}
+	for _, opt := range opts {
+		opt(lg)
+	}
+	for _, f := range funcs {
+		for _, c := range lg.statusCodes {
+			lg.funcStatusCounter.WithLabelValues(f.name, c)
+		}
 	}
 	lg.registerMetrics()
 	ch := make(chan *Function, 1)
@@ -337,12 +369,18 @@ func (lg *LoadGen) worker(ctx context.Context, in <-chan *Function) {
 func (lg *LoadGen) execFn(ctx context.Context, fn *Function) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	var err error
+	st := time.Now()
+	defer func() {
+		lg.funcHistogram.WithLabelValues(fn.name, lg.statusCodeMapper(err)).Observe(time.Since(st).Seconds())
+		lg.funcStatusCounter.WithLabelValues(fn.name, lg.statusCodeMapper(err)).Inc()
+	}()
 	payload := make(map[string]interface{})
 	if fn.finallyBlock != nil {
 		defer lg.execStmt(ctx, fn.finallyBlock, payload)
 	}
 	for _, stmt := range fn.stmts {
-		err := lg.execStmt(ctx, stmt, payload)
+		err = lg.execStmt(ctx, stmt, payload)
 		if err != nil {
 			// discard err. This is just to stop the Function execution
 			return
