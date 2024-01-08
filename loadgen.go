@@ -151,6 +151,8 @@ func GenerateLoad(ctx context.Context, cancel context.CancelFunc, loadLabel stri
 	for _, opt := range opts {
 		opt(lg)
 	}
+	prometheus.MustRegister(lg.funcHistogram)
+	prometheus.MustRegister(lg.funcStatusCounter)
 	for _, f := range funcs {
 		for _, c := range lg.statusCodes {
 			lg.funcStatusCounter.WithLabelValues(f.name, c)
@@ -372,8 +374,9 @@ func (lg *LoadGen) execFn(ctx context.Context, fn *Function) {
 	var err error
 	st := time.Now()
 	defer func() {
-		lg.funcHistogram.WithLabelValues(fn.name, lg.statusCodeMapper(err)).Observe(time.Since(st).Seconds())
-		lg.funcStatusCounter.WithLabelValues(fn.name, lg.statusCodeMapper(err)).Inc()
+		status := lg.statusCodeMapper(err)
+		lg.funcHistogram.WithLabelValues(fn.name, status).Observe(time.Since(st).Seconds())
+		lg.funcStatusCounter.WithLabelValues(fn.name, status).Inc()
 	}()
 	payload := make(map[string]interface{})
 	if fn.finallyBlock != nil {
